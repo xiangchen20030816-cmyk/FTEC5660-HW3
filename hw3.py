@@ -57,7 +57,7 @@ def load_env_file(path: Path = Path(".env")) -> None:
 
 # Choose any 3 of the 15 points, e.g. CHOSEN_POINTS = [1, 7, 15]. Your agent
 # gives a PASS or FAIL verdict on these 3 points only, with your own rule for each.
-CHOSEN_POINTS: list[int] = []  ### YOUR CODE HERE
+CHOSEN_POINTS: list[int] = [4, 7, 11]  ### YOUR CODE HERE
 
 
 def build_agent() -> Any:
@@ -72,9 +72,18 @@ def build_agent() -> Any:
     you will probably create one tool-calling agent per company there.
     """
     ### YOUR CODE HERE
+    from langchain_deepseek import ChatDeepSeek
+
+    return ChatDeepSeek(
+        model=MODEL_NAME,
+        temperature=0,
+        max_tokens=1500,
+        timeout=60,
+        max_retries=2,
+    )
     return None
 
-
+#使用工具分析公司
 async def analyze_companies(agent: Any, companies: dict[str, list[Any]]) -> dict[str, dict[str, Any]]:
     """Run your agent and return its verdicts on CHOSEN_POINTS for every company.
 
@@ -109,6 +118,200 @@ async def analyze_companies(agent: Any, companies: dict[str, list[Any]]) -> dict
     You may analyse companies in parallel (e.g. ``asyncio.gather``).
     """
     ### YOUR CODE HERE
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    # (topic, primary interviewee, backup interviewee)
+    interview_plan = {
+        4: ("sales_team", "customer", "competitor"),
+        7: ("working_conditions", "current_employee", "former_employee"),
+        11: ("competitive_edge", "competitor", "customer"),
+    }
+    
+    rules = {
+        4: "PASS when sales staff are capable, consultative, responsive and valuable; "
+           "FAIL for weak, passive or ineffective sales support.",
+        7: "PASS for healthy morale, respectful treatment and good working conditions; "
+           "FAIL for serious personnel, morale or working-condition problems.",
+        11: "PASS for a meaningful competitive advantage such as differentiated "
+            "expertise, products, service or loyalty; FAIL when readily replaceable "
+            "or behind competitors.",
+    }
+
+    unknown_points = set(CHOSEN_POINTS) - set(interview_plan)
+    if unknown_points:
+        raise ValueError(
+            f"This interview-only workflow does not cover points {sorted(unknown_points)}"
+        )
+
+    criteria = "\n".join(
+        f"POINT {p}: {FISHER_POINTS[p]}\nRule: {rules[p]}"
+        for p in CHOSEN_POINTS
+    )
+    format_example = {
+        "points": {str(p): "PASS" for p in CHOSEN_POINTS},
+        "summary": "2-3 short English sentences justifying the verdicts.",
+        "needs_followup": [],
+    }
+
+    system_prompt = (
+        "You are a careful analyst applying Philip Fisher's stock-selection principles.\n"
+        "Use ONLY the interview evidence provided for the target company.\n"
+        "Judge the target company, NOT the interviewee or the interviewee's employer.\n"
+        "Consider each point independently. Handle negation and comparisons accurately.\n"
+        "A clearly negative interview is sufficient evidence for FAIL; do NOT request "
+        "more interviews just because the verdict is FAIL.\n"
+        "Ask for another interview only when the existing quotation is missing, "
+        "non-informative, internally ambiguous, or insufficient to determine a verdict.\n"
+        "Do not fabricate facts. Make the best supported provisional PASS/FAIL judgment "
+        "even when evidence is incomplete.\n\n"
+        f"{criteria}\n\n"
+        "Return ONLY JSON with fields: points, summary, needs_followup.\n"
+        "points must map each chosen point number to PASS or FAIL; summary is 2-3 "
+        "short English sentences; needs_followup is a list of point numbers needing "
+        "a second interview, or [] if all are sufficiently supported.\n"
+        "Example FORMAT only (not the correct answers):\n"
+        f"{json.dumps(format_example)}"
+    )
+
+    def parse_answer(content: Any) -> dict[str, Any] | None:
+        if not isinstance(content, str):
+            return None
+        start, end = content.find("{"), content.rfind("}")
+        if start == -1 or end < start:
+            return None
+        try:
+            obj = json.loads(content[start:end + 1])
+            raw_points = obj["points"]
+            points: dict[int, str] = {}
+            for point in CHOSEN_POINTS:
+                val = raw_points.get(str(point), raw_points.get(point))
+                if not isinstance(val, str) or val.strip().upper() not in VERDICTS:
+                    return None
+                points[point] = val.strip().upper()
+            summary = obj["summary"]
+            if not isinstance(summary, str) or not summary.strip():
+                return None
+            needs_raw = obj.get("needs_followup", [])
+            if not isinstance(needs_raw, list):
+                return None
+            needs_followup: set[int] = set()
+            for val in needs_raw:
+                if not isinstance(val, (int, str)) or str(val) not in {
+                    str(p) for p in CHOSEN_POINTS
+                }:
+                    return None
+                needs_followup.add(int(val))
+            return {
+                "points": points,
+                "summary": summary.strip(),
+                "needs_followup": needs_followup,
+            }
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return None
+
+    def informative(quote: str) -> bool:
+        if not isinstance(quote, str) or not quote.strip():
+            return False
+        low = quote.lower()
+        return not any(s in low for s in (
+            "interview limit reached", "i can't comment", "i can’t comment",
+            "cannot comment", "no comment on that", "unknown role", "unknown topic",
+            "interview error:",
+        ))
+
+    semaphore = asyncio.Semaphore(4)
+
+    async def ask_model(name: str, evidence: dict[str, Any]):
+        user_prompt = (
+            f"Target company: {name}\n"
+            "Assess these interview quotations. If multiple interviews cover a point, "
+            "consider both.\n"
+            + json.dumps(evidence, ensure_ascii=False)
+        )
+        async with semaphore:
+            last_error = "unknown error"
+            for attempt in range(3):
+                try:
+                    reply = await agent.ainvoke([
+                        SystemMessage(content=system_prompt),
+                        HumanMessage(content=user_prompt),
+                    ])
+                    result = parse_answer(reply.content)
+                    if result is not None:
+                        return result, ""
+                    last_error = "invalid model JSON/verdicts"
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+                if attempt < 2:
+                    await asyncio.sleep(1 + 2 * attempt)
+            return None, last_error
+
+    async def analyze_one(name: str, tools: list[Any]):
+        try:
+            interview_tool = tools[3]
+            evidence: dict[str, Any] = {}
+            backup_used: set[int] = set()
+
+            def obtain(point: int, backup: bool) -> None:
+                topic, primary, alternate = interview_plan[point]
+                role = alternate if backup else primary
+                try:
+                    quote = interview_tool.invoke({"role": role, "topic": topic})
+                except Exception as exc:
+                    quote = f"Interview error: {type(exc).__name__}: {exc}"
+                evidence[str(point)]["interviews"].append({
+                    "role": role, "quote": str(quote)
+                })
+                if backup:
+                    backup_used.add(point)
+
+            # Stage 1: one interview per point. Use a backup immediately if invalid.
+            for point in CHOSEN_POINTS:
+                evidence[str(point)] = {
+                    "question": FISHER_POINTS[point], "interviews": []
+                }
+                obtain(point, backup=False)
+                first_quote = evidence[str(point)]["interviews"][0]["quote"]
+                if not informative(first_quote):
+                    obtain(point, backup=True)
+
+            result, error = await ask_model(name, evidence)
+            if result is None:
+                print(f"[ERROR] {name}: {error}", flush=True)
+                return name, {"points": {}, "summary": f"Analysis failed: {error}"}
+
+            # Stage 2: only interview another knowledgeable person when needed.
+            followups = result["needs_followup"] - backup_used
+            for point in CHOSEN_POINTS:
+                if point in followups:
+                    obtain(point, backup=True)
+
+            if followups:
+                second_result, error = await ask_model(name, evidence)
+                if second_result is not None:
+                    result = second_result
+                else:
+                    print(f"[WARN] {name}: follow-up analysis failed ({error}); "
+                          "using first verdict", flush=True)
+
+            final_result = {
+                "points": result["points"], "summary": result["summary"]
+            }
+            count = sum(len(x["interviews"]) for x in evidence.values())
+            print(f"[OK] {name}: {final_result['points']} "
+                  f"(interviews={count})", flush=True)
+            return name, final_result
+        except Exception as exc:
+            print(f"[ERROR] {name}: {type(exc).__name__}: {exc}", flush=True)
+            return name, {
+                "points": {}, "summary": "Evidence collection or analysis failed."
+            }
+
+    items = await asyncio.gather(
+        *(analyze_one(name, tools) for name, tools in companies.items())
+    )
+    return dict(items)
+
     _ = agent
     return {name: {"points": {}, "summary": ""} for name in companies}
 
