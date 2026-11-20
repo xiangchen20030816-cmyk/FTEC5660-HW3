@@ -174,50 +174,49 @@ names and wording, and scores your 3 points only.
 
 ### My 3 points and rules
 
-I chose Fisher's Points **4, 7, and 11** because they focus on important qualitative aspects of a company and can be assessed through Fisher's *scuttlebutt* approach. The provided interview tool offers knowledgeable respondents for each topic, so the agent can obtain relevant evidence without relying on unsupported management claims or unnecessary database queries.
+I chose Fisher's Points **4, 7, and 11** because they focus on important qualitative aspects of a company and can be assessed through Fisher's *scuttlebutt* approach. The provided interview tool offers knowledgeable respondents for each topic, allowing the agent to collect relevant evidence without using unnecessary database or document queries.
 
-| Point | Why I chose it | PASS rule | Evidence |
-| --- | --- | --- | --- |
-| **4 — Above-average sales organization** | Sales quality affects customer relationships and the ability to compete. | **PASS** when the sales staff are capable, consultative, responsive, and valuable to customers; **FAIL** when sales support is weak, passive, or ineffective. | `customer` on `sales_team`; backup: `competitor`. |
-| **7 — Labor and personnel relations** | Employee morale and working conditions can reflect an organization's long-term health. | **PASS** for healthy morale, respectful treatment, and good working conditions; **FAIL** for serious problems involving personnel, morale, or working conditions. | `current_employee` on `working_conditions`; backup: `former_employee`. |
-| **11 — Advantage over competitors** | A meaningful competitive advantage helps a company stand out from its rivals. | **PASS** for a credible advantage such as differentiated products, expertise, service, or customer loyalty; **FAIL** when the company is easily replaceable or behind competitors. | `competitor` on `competitive_edge`; backup: `customer`. |
+| Point                                    | Why I chose it                                               | PASS rule                                                    | Evidence                                                     |
+| ---------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **4 — Above-average sales organization** | Sales quality affects customer relationships and the ability to compete. | **PASS** when sales staff are capable, consultative, responsive, and valuable to customers; **FAIL** when sales support is weak, passive, or ineffective. | Primary: `customer` on `sales_team`; backup: `competitor`.   |
+| **7 — Labor and personnel relations**    | Employee morale and working conditions can reflect an organization's long-term health. | **PASS** for healthy morale, respectful treatment, and good working conditions; **FAIL** for serious problems involving personnel, morale, or working conditions. | Primary: `current_employee` on `working_conditions`; backup: `former_employee`. |
+| **11 — Advantage over competitors**      | A meaningful competitive advantage helps a company stand out from its rivals. | **PASS** for a credible advantage such as differentiated products, expertise, service, or customer loyalty; **FAIL** when the company is easily replaceable or behind competitors. | Primary: `competitor` on `competitive_edge`; backup: `customer`. |
 
-All three selected points have interview-based evidence specified in the assignment. For these points, the workflow uses the provided `interview` tool rather than querying documents or the database.
+All three points have interview-based evidence specified in the assignment. The workflow uses the provided LangChain `interview` tool and does not read company data directly or query the database and documents for these points.
 
 ### Design
 
 ```mermaid
 flowchart TD
-    A[Company and its LangChain tools] --> B[Plan interviews for Points 4, 7, 11]
+    A[Company and its provided LangChain tools] --> B[Plan interviews for Points 4, 7, 11]
     B --> C[Collect one primary interview per point]
-    C --> D{Response informative?}
-    D -- No --> E[Interview alternate knowledgeable role]
-    D -- Yes --> F[Prepare evidence and Fisher criteria]
-    E --> F
-    F --> G[DeepSeek V4 Flash via LangChain]
-    G --> H[Parse PASS/FAIL, summary, follow-up requests]
-    H --> I{More evidence needed?}
-    I -- Yes --> J[Collect unused backup interviews]
-    J --> K[Reassess with combined evidence]
-    K --> L[Validate and return final results]
-    I -- No --> L
-    L --> M[Provided runner: results.csv and scoring]
+    C --> D[Prepare interview evidence and Fisher criteria]
+    D --> E[DeepSeek V4 Flash via LangChain]
+    E --> F[Parse and validate verdicts, summary and follow-up requests]
+    F --> G{Does the model request more evidence?}
+    G -- No --> H[Return final PASS/FAIL verdicts and summary]
+    G -- Yes --> I[Interview alternate knowledgeable roles for requested points]
+    I --> J[Reassess using original and additional interviews]
+    J --> H
+    H --> K[Provided runner writes results.csv and calculates score]
 ```
 
-The implementation uses a **Python-orchestrated, evidence-grounded LangChain workflow**. `build_agent()` initializes `ChatDeepSeek` with the required `deepseek-v4-flash` model. For each company, `analyze_companies()` maps the three selected points to appropriate interview roles and topics, calls the provided LangChain interview tool, and supplies the collected quotations and explicit PASS/FAIL rules to the model. The model evaluates each point independently, produces a short summary, and indicates whether any point needs a follow-up. The program checks the JSON output and, when necessary, interviews an alternate knowledgeable respondent before reassessing. `asyncio.gather()` processes companies concurrently, while a semaphore limits simultaneous model calls to four. Errors are handled separately for each company so that one failed analysis does not terminate the whole run. Because interview routing is planned in Python, this is a tool-using workflow rather than an autonomous tool-selection agent.
+The implementation uses a **Python-orchestrated, evidence-grounded LangChain workflow**. `build_agent()` initializes `ChatDeepSeek` with the required `deepseek-v4-flash` model. For each company, `analyze_companies()` routes Points 4, 7, and 11 to their designated interview topics and knowledgeable primary respondents, then collects one interview per point using the provided LangChain tool. The quotations and explicit PASS/FAIL criteria are passed to DeepSeek, which evaluates each point independently, generates a brief summary, and decides whether additional evidence is needed. If the model requests follow-up evidence, the program interviews the corresponding alternate respondent and asks DeepSeek to reassess using both quotations. Model responses are parsed and checked for valid JSON and verdicts. `asyncio.gather()` processes companies concurrently, with a semaphore limiting simultaneous model calls to four. Errors are handled per company so a single failure does not crash the entire run. Tool routing and follow-up execution are controlled by Python, while the model makes the evidence-sufficiency and investment-point judgments.
 
 ### Results
 
-The agent was evaluated with:
+The public test was run with:
 
-`python hw3.py --data-folder public_test`
+```bash
+python hw3.py --data-folder public_test
+```
 
-| Public-test metric | Result |
-| --- | ---: |
-| Companies analyzed | 20 / 20 |
-| Correct verdicts across Points 4, 7, and 11 | **60 / 60** |
-| Balanced point accuracy | **100.0%** |
-| Companies with disagreements | **None** |
-| Interviews used | 3 per company (60 total) |
+| Public-test metric                          |                       Result |
+| ------------------------------------------- | ---------------------------: |
+| Companies analyzed                          |                  **20 / 20** |
+| Correct verdicts across Points 4, 7, and 11 |                  **60 / 60** |
+| Balanced point accuracy                     |                   **100.0%** |
+| Companies with disagreements                |                     **None** |
+| Interviews used                             | **3 per company (60 total)** |
 
-All 60 verdicts matched `public_test/ground_truth.json`, so **there are no disagreement cases to explain**. All companies returned valid results. Each company required only the three primary interviews; no backup interview was triggered in this public-test run. This confirms that the main analysis path worked on the public data.
+All 60 verdicts matched `public_test/ground_truth.json`, so there were **no disagreements to investigate or explain** in the reported public run. Each company needed only its three primary interviews, and no follow-up was requested. These results demonstrate that the main workflow performed well on the public data.

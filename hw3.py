@@ -126,7 +126,6 @@ async def analyze_companies(agent: Any, companies: dict[str, list[Any]]) -> dict
         7: ("working_conditions", "current_employee", "former_employee"),
         11: ("competitive_edge", "competitor", "customer"),
     }
-    
     rules = {
         4: "PASS when sales staff are capable, consultative, responsive and valuable; "
            "FAIL for weak, passive or ineffective sales support.",
@@ -152,7 +151,6 @@ async def analyze_companies(agent: Any, companies: dict[str, list[Any]]) -> dict
         "summary": "2-3 short English sentences justifying the verdicts.",
         "needs_followup": [],
     }
-
     system_prompt = (
         "You are a careful analyst applying Philip Fisher's stock-selection principles.\n"
         "Use ONLY the interview evidence provided for the target company.\n"
@@ -209,16 +207,6 @@ async def analyze_companies(agent: Any, companies: dict[str, list[Any]]) -> dict
         except (ValueError, TypeError, KeyError, AttributeError):
             return None
 
-    def informative(quote: str) -> bool:
-        if not isinstance(quote, str) or not quote.strip():
-            return False
-        low = quote.lower()
-        return not any(s in low for s in (
-            "interview limit reached", "i can't comment", "i can’t comment",
-            "cannot comment", "no comment on that", "unknown role", "unknown topic",
-            "interview error:",
-        ))
-
     semaphore = asyncio.Semaphore(4)
 
     async def ask_model(name: str, evidence: dict[str, Any]):
@@ -247,71 +235,69 @@ async def analyze_companies(agent: Any, companies: dict[str, list[Any]]) -> dict
             return None, last_error
 
     async def analyze_one(name: str, tools: list[Any]):
-        try:
-            interview_tool = tools[3]
-            evidence: dict[str, Any] = {}
-            backup_used: set[int] = set()
-
-            def obtain(point: int, backup: bool) -> None:
-                topic, primary, alternate = interview_plan[point]
-                role = alternate if backup else primary
-                try:
-                    quote = interview_tool.invoke({"role": role, "topic": topic})
-                except Exception as exc:
-                    quote = f"Interview error: {type(exc).__name__}: {exc}"
-                evidence[str(point)]["interviews"].append({
-                    "role": role, "quote": str(quote)
-                })
-                if backup:
-                    backup_used.add(point)
-
-            # Stage 1: one interview per point. Use a backup immediately if invalid.
-            for point in CHOSEN_POINTS:
-                evidence[str(point)] = {
-                    "question": FISHER_POINTS[point], "interviews": []
+            try:
+                interview_tool = tools[3]
+                evidence: dict[str, Any] = {}
+                backup_used: set[int] = set()
+    
+                def obtain(point: int, backup: bool) -> None:
+                    topic, primary, alternate = interview_plan[point]
+                    role = alternate if backup else primary
+                    try:
+                        quote = interview_tool.invoke({"role": role, "topic": topic})
+                    except Exception as exc:
+                        quote = f"Interview error: {type(exc).__name__}: {exc}"
+                    evidence[str(point)]["interviews"].append({
+                        "role": role, "quote": str(quote)
+                    })
+                    if backup:
+                        backup_used.add(point)
+    
+                # Stage 1: collect one primary interview for each selected point.
+                # The model decides whether another interview is needed.
+                for point in CHOSEN_POINTS:
+                    evidence[str(point)] = {
+                        "question": FISHER_POINTS[point], "interviews": []
+                    }
+                    obtain(point, backup=False)
+    
+                result, error = await ask_model(name, evidence)
+                if result is None:
+                    print(f"[ERROR] {name}: {error}", flush=True)
+                    return name, {"points": {}, "summary": f"Analysis failed: {error}"}
+    
+                # Stage 2: only interview another knowledgeable person when needed.
+                followups = result["needs_followup"] - backup_used
+                for point in CHOSEN_POINTS:
+                    if point in followups:
+                        obtain(point, backup=True)
+    
+                if followups:
+                    second_result, error = await ask_model(name, evidence)
+                    if second_result is not None:
+                        result = second_result
+                    else:
+                        print(f"[WARN] {name}: follow-up analysis failed ({error}); "
+                              "using first verdict", flush=True)
+    
+                final_result = {
+                    "points": result["points"], "summary": result["summary"]
                 }
-                obtain(point, backup=False)
-                first_quote = evidence[str(point)]["interviews"][0]["quote"]
-                if not informative(first_quote):
-                    obtain(point, backup=True)
-
-            result, error = await ask_model(name, evidence)
-            if result is None:
-                print(f"[ERROR] {name}: {error}", flush=True)
-                return name, {"points": {}, "summary": f"Analysis failed: {error}"}
-
-            # Stage 2: only interview another knowledgeable person when needed.
-            followups = result["needs_followup"] - backup_used
-            for point in CHOSEN_POINTS:
-                if point in followups:
-                    obtain(point, backup=True)
-
-            if followups:
-                second_result, error = await ask_model(name, evidence)
-                if second_result is not None:
-                    result = second_result
-                else:
-                    print(f"[WARN] {name}: follow-up analysis failed ({error}); "
-                          "using first verdict", flush=True)
-
-            final_result = {
-                "points": result["points"], "summary": result["summary"]
-            }
-            count = sum(len(x["interviews"]) for x in evidence.values())
-            print(f"[OK] {name}: {final_result['points']} "
-                  f"(interviews={count})", flush=True)
-            return name, final_result
-        except Exception as exc:
-            print(f"[ERROR] {name}: {type(exc).__name__}: {exc}", flush=True)
-            return name, {
-                "points": {}, "summary": "Evidence collection or analysis failed."
-            }
-
+                count = sum(len(x["interviews"]) for x in evidence.values())
+                print(f"[OK] {name}: {final_result['points']} "
+                      f"(interviews={count})", flush=True)
+                return name, final_result
+            except Exception as exc:
+                print(f"[ERROR] {name}: {type(exc).__name__}: {exc}", flush=True)
+                return name, {
+                    "points": {}, "summary": "Evidence collection or analysis failed."
+                }
+    
     items = await asyncio.gather(
         *(analyze_one(name, tools) for name, tools in companies.items())
     )
     return dict(items)
-
+    
     _ = agent
     return {name: {"points": {}, "summary": ""} for name in companies}
 
