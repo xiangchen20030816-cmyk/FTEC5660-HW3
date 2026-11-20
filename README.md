@@ -171,13 +171,53 @@ companies with the same tools and the same answer key rules, but different
 names and wording, and scores your 3 points only.
 
 ## Homework 3 solution:
-> to students: this is your report, see the homework description.
 
 ### My 3 points and rules
-> for each point: why you chose it, your PASS rule in one or two sentences, and the evidence it uses. Quote Fisher where it helps.
+
+I chose Fisher's Points **4, 7, and 11** because they focus on important qualitative aspects of a company and can be assessed through Fisher's *scuttlebutt* approach. The provided interview tool offers knowledgeable respondents for each topic, so the agent can obtain relevant evidence without relying on unsupported management claims or unnecessary database queries.
+
+| Point | Why I chose it | PASS rule | Evidence |
+| --- | --- | --- | --- |
+| **4 — Above-average sales organization** | Sales quality affects customer relationships and the ability to compete. | **PASS** when the sales staff are capable, consultative, responsive, and valuable to customers; **FAIL** when sales support is weak, passive, or ineffective. | `customer` on `sales_team`; backup: `competitor`. |
+| **7 — Labor and personnel relations** | Employee morale and working conditions can reflect an organization's long-term health. | **PASS** for healthy morale, respectful treatment, and good working conditions; **FAIL** for serious problems involving personnel, morale, or working conditions. | `current_employee` on `working_conditions`; backup: `former_employee`. |
+| **11 — Advantage over competitors** | A meaningful competitive advantage helps a company stand out from its rivals. | **PASS** for a credible advantage such as differentiated products, expertise, service, or customer loyalty; **FAIL** when the company is easily replaceable or behind competitors. | `competitor` on `competitive_edge`; backup: `customer`. |
+
+All three selected points have interview-based evidence specified in the assignment. For these points, the workflow uses the provided `interview` tool rather than querying documents or the database.
 
 ### Design
-> a visualization of your agent design and one paragraph describing it.
+
+```mermaid
+flowchart TD
+    A[Company and its LangChain tools] --> B[Plan interviews for Points 4, 7, 11]
+    B --> C[Collect one primary interview per point]
+    C --> D{Response informative?}
+    D -- No --> E[Interview alternate knowledgeable role]
+    D -- Yes --> F[Prepare evidence and Fisher criteria]
+    E --> F
+    F --> G[DeepSeek V4 Flash via LangChain]
+    G --> H[Parse PASS/FAIL, summary, follow-up requests]
+    H --> I{More evidence needed?}
+    I -- Yes --> J[Collect unused backup interviews]
+    J --> K[Reassess with combined evidence]
+    K --> L[Validate and return final results]
+    I -- No --> L
+    L --> M[Provided runner: results.csv and scoring]
+```
+
+The implementation uses a **Python-orchestrated, evidence-grounded LangChain workflow**. `build_agent()` initializes `ChatDeepSeek` with the required `deepseek-v4-flash` model. For each company, `analyze_companies()` maps the three selected points to appropriate interview roles and topics, calls the provided LangChain interview tool, and supplies the collected quotations and explicit PASS/FAIL rules to the model. The model evaluates each point independently, produces a short summary, and indicates whether any point needs a follow-up. The program checks the JSON output and, when necessary, interviews an alternate knowledgeable respondent before reassessing. `asyncio.gather()` processes companies concurrently, while a semaphore limits simultaneous model calls to four. Errors are handled separately for each company so that one failed analysis does not terminate the whole run. Because interview routing is planned in Python, this is a tool-using workflow rather than an autonomous tool-selection agent.
 
 ### Results
-> your point score on `public_test`, the companies where your verdicts disagree with the public answers, and why.
+
+The agent was evaluated with:
+
+`python hw3.py --data-folder public_test`
+
+| Public-test metric | Result |
+| --- | ---: |
+| Companies analyzed | 20 / 20 |
+| Correct verdicts across Points 4, 7, and 11 | **60 / 60** |
+| Balanced point accuracy | **100.0%** |
+| Companies with disagreements | **None** |
+| Interviews used | 3 per company (60 total) |
+
+All 60 verdicts matched `public_test/ground_truth.json`, so **there are no disagreement cases to explain**. All companies returned valid results. Each company required only the three primary interviews; no backup interview was triggered in this public-test run. This confirms that the main analysis path worked on the public data.
